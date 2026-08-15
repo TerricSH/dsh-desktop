@@ -24,6 +24,27 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(here, '..')
 const ASSETS = path.join(ROOT, 'assets')
 
+// Portable/test mode: keep Chromium's profile (cookies, caches) out of AppData.
+// Must run before any path derived from userData below.
+if (process.env.DSH_DESKTOP_USERDATA) {
+  app.setPath('userData', path.resolve(process.env.DSH_DESKTOP_USERDATA))
+}
+
+// Bundled harness: packaged apps keep it under process.resourcesPath, dev
+// builds under resources/ next to the project.
+const HARNESS_ROOT = app.isPackaged
+  ? path.join(process.resourcesPath, 'harness')
+  : path.join(ROOT, 'resources', 'harness')
+
+// The app's own DSH home (writable, per-user) unless the user overrides it.
+const HOME_DIR = process.env.DSH_DESKTOP_HOME
+  ? path.resolve(process.env.DSH_DESKTOP_HOME)
+  : path.join(app.getPath('userData'), 'dsh-home')
+
+// Writable scratch area: inside the asar there is no filesystem, so packaged
+// builds keep logs and smoke output under userData.
+const DATA_DIR = app.isPackaged ? path.join(app.getPath('userData'), 'data') : path.join(ROOT, 'data')
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function parseFlags(argv) {
@@ -45,11 +66,6 @@ function parseFlags(argv) {
 
 const flags = parseFlags(process.argv.slice(1))
 
-// Portable/test mode: keep Chromium's profile (cookies, caches) out of AppData.
-if (process.env.DSH_DESKTOP_USERDATA) {
-  app.setPath('userData', path.resolve(process.env.DSH_DESKTOP_USERDATA))
-}
-
 if (flags.help) {
   console.log(`dsh-desktop — DeepSeek Harness desktop shell
 
@@ -62,7 +78,9 @@ Usage: npm start [-- --smoke] [-- --port <n>] [-- --dsh-command <cmd>] [-- --no-
 
 Environment:
   DSH_DESKTOP_COMMAND   same as --dsh-command
-  DSH_DESKTOP_PORT      same as --port`)
+  DSH_DESKTOP_PORT      same as --port
+  DSH_DESKTOP_HOME      DSH home for the app's own server (default: <userData>/dsh-home)
+  DSH_DESKTOP_USERDATA  Chromium profile dir (portable/test mode)`)
   app.exit(0)
 }
 
@@ -171,7 +189,8 @@ async function runSmoke() {
   }
   await sleep(4000) // let the client modules settle before the screenshot
   const image = await win.webContents.capturePage()
-  const out = path.join(ROOT, 'smoke.png')
+  const out = path.join(DATA_DIR, 'smoke.png')
+  fs.mkdirSync(DATA_DIR, { recursive: true })
   fs.writeFileSync(out, image.toPNG())
   console.log(`SMOKE_OK ${url} ${image.getSize().width}x${image.getSize().height} -> ${out}`)
 }
@@ -186,11 +205,14 @@ if (!gotLock && !flags.smoke) {
     server = new DshServer({
       port: flags.port,
       dshCommand: flags.dshCommand,
-      logDir: path.join(ROOT, 'data'),
+      harnessRoot: HARNESS_ROOT,
+      homeDir: HOME_DIR,
+      logDir: DATA_DIR,
     })
     try {
       const { mode, url } = await server.start()
-      console.log(`[dsh-desktop] server ${mode} at ${url}`)
+      const modeLabel = mode === 'bundled' ? 'spawned bundled harness' : mode === 'external' ? 'spawned external dsh' : 'attached'
+      console.log(`[dsh-desktop] server ${modeLabel} at ${url}`)
       openWindow(url)
       if (flags.smoke) {
         await runSmoke()

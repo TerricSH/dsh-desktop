@@ -51,6 +51,37 @@ app.whenReady().then(async () => {
     fs.writeFileSync(path.join(ASSETS, `icon-${size}.png`), resized.toPNG())
   }
   fs.copyFileSync(path.join(ASSETS, 'icon-256.png'), path.join(ASSETS, 'icon.png'))
-  log('wrote icon.png, icon-256.png, icon-64.png, icon-32.png, icon-16.png')
+  writeIco()
+  log('wrote icon.png, icon-256.png, icon-64.png, icon-32.png, icon-16.png, icon.ico')
   app.exit(0)
 })
+
+/** Write a valid Windows .ico (PNG-compressed entries, one per size). */
+function writeIco() {
+  const entries = [16, 32, 64, 256].map((size) => ({
+    size,
+    png: fs.readFileSync(path.join(ASSETS, `icon-${size}.png`)),
+  }))
+  const headerSize = 6
+  const entrySize = 16
+  let offset = headerSize + entries.length * entrySize
+  const buffer = Buffer.alloc(headerSize + entries.length * entrySize + entries.reduce((n, e) => n + e.png.length, 0))
+  buffer.writeUInt16LE(0, 0) // reserved
+  buffer.writeUInt16LE(1, 2) // type: icon
+  buffer.writeUInt16LE(entries.length, 4)
+  for (let i = 0; i < entries.length; i += 1) {
+    const { size, png } = entries[i]
+    const base = headerSize + i * entrySize
+    buffer.writeUInt8(size === 256 ? 0 : size, base) // 0 means 256
+    buffer.writeUInt8(size === 256 ? 0 : size, base + 1)
+    buffer.writeUInt8(0, base + 2)
+    buffer.writeUInt8(0, base + 3)
+    buffer.writeUInt16LE(1, base + 4) // planes
+    buffer.writeUInt16LE(32, base + 6) // bit count
+    buffer.writeUInt32LE(png.length, base + 8)
+    buffer.writeUInt32LE(offset, base + 12)
+    png.copy(buffer, offset)
+    offset += png.length
+  }
+  fs.writeFileSync(path.join(ASSETS, 'icon.ico'), buffer)
+}

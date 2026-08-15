@@ -7,7 +7,36 @@
   "scripts": {
     "start": "electron .",
     "smoke": "electron . --smoke",
-    "make-icon": "electron scripts/make-icon.mjs"
+    "make-icon": "electron scripts/make-icon.mjs",
+    "bundle": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bundle-harness.ps1",
+    "dist": "electron-builder --win portable"
+  },
+  "build": {
+    "appId": "com.terricsh.dsh-desktop",
+    "productName": "DSH Desktop",
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/harness",
+        "to": "harness",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        "portable"
+      ]
+    }
   },
   "repository": {
     "type": "git",
@@ -22,6 +51,7 @@
     "gui"
   ],
   "devDependencies": {
-    "electron": "^43.4.0"
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3"
   }
 }

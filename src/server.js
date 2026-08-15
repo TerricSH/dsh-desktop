@@ -1,10 +1,14 @@
-// The dsh web server manager: attach to a running server, or resolve the dsh
-// CLI and spawn one. Only a server this process spawned is stopped on quit;
-// an attached server is left running (it may serve other windows).
+// The dsh web server manager: attach to a running server, or start an
+// independent one. The independent server is spawned either from the bundled
+// harness (resources/harness, run with Electron's own Node runtime via
+// ELECTRON_RUN_AS_NODE — fully self-contained) or from an externally resolved
+// dsh launcher. Only a server this process spawned is stopped on quit; an
+// attached server is left running (it may serve other windows).
 
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { ensureHome } from './home.js'
 
 const LOOPBACK = '127.0.0.1'
 
@@ -15,7 +19,7 @@ export function localUrl(port) {
 /** Whether an HTTP server answers at url (any status counts as an answer). */
 export async function probe(url, timeoutMs = 1500) {
   try {
-    const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) })
+    await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) })
     return true
   } catch {
     return false
@@ -41,7 +45,7 @@ function findOnPath(name) {
 }
 
 /**
- * Resolve a `dsh` launcher to spawn, in order:
+ * Resolve an external `dsh` launcher to spawn, in order:
  * 1. `DSH_DESKTOP_COMMAND` (explicit override, may carry its own arguments)
  * 2. `dsh` on PATH
  * 3. the npm global prefix (`$APPDATA/npm/dsh.cmd`)
@@ -70,63 +74,118 @@ export function resolveDshCommand(env = process.env) {
   return undefined
 }
 
+/** The bundled harness entry: bin.js of the dsh CLI inside resources/harness. */
+export function bundledDshBin(harnessRoot) {
+  const bin = path.join(harnessRoot, 'install', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+  return fs.existsSync(bin) ? bin : undefined
+}
+
 export class DshServer {
   /**
    * @param {object} options
    * @param {number} [options.port] - the port the Web GUI is expected on (default 3080).
-   * @param {string} [options.dshCommand] - explicit launcher; falls back to resolveDshCommand().
+   * @param {string} [options.dshCommand] - explicit external launcher override.
+   * @param {string} [options.harnessRoot] - bundled harness dir (resources/harness).
+   * @param {string} [options.homeDir] - DSH_HOME used when spawning the bundled
+   * harness; also honored as DSH_HOME for an external spawn when set.
    * @param {string} logDir - directory for the spawned server's log file.
    * @param {number} [options.spawnTimeoutMs] - readiness budget after spawning (default 90s).
    */
-  constructor({ port = 3080, dshCommand, logDir, spawnTimeoutMs = 90_000 } = {}) {
+  constructor({ port = 3080, dshCommand, harnessRoot, homeDir, logDir, spawnTimeoutMs = 90_000 } = {}) {
     this.port = port
     this.url = localUrl(port)
-    this.dshCommand = dshCommand ?? resolveDshCommand()
+    this.explicitCommand = dshCommand
+    this.harnessRoot = harnessRoot
+    this.homeDir = homeDir
     this.logPath = path.join(logDir, 'server.log')
     this.spawnTimeoutMs = spawnTimeoutMs
-    /** @type {'attached'|'spawned'|undefined} */
+    /** @type {'attached'|'bundled'|'external'|undefined} */
     this.mode = undefined
     /** @type {import('node:child_process').ChildProcess | undefined} */
     this.child = undefined
   }
 
   /**
-   * Attach to a server already answering on the port, or spawn the dsh CLI.
-   * @returns {{ mode: 'attached'|'spawned', url: string, pid?: number }}
+   * Attach to a server already answering on the port, or start one.
+   * @returns {{ mode: 'attached'|'bundled'|'external', url: string, pid?: number }}
    */
   async start() {
     if (await probe(this.url)) {
       this.mode = 'attached'
       return { mode: 'attached', url: this.url }
     }
-    if (!this.dshCommand) {
+
+    const bundled = bundledDshBin(this.harnessRoot)
+    if (!this.explicitCommand && bundled) {
+      return this.spawnBundled(bundled)
+    }
+    const command = this.explicitCommand ?? resolveDshCommand()
+    if (!command) {
       throw new Error(
         `no DSH server on ${this.url} and no dsh launcher found. ` +
-        'Set DSH_DESKTOP_COMMAND to the dsh.cmd path (or add dsh to PATH).'
+        'Run `npm run bundle` once so the app carries its own harness, ' +
+        'or set DSH_DESKTOP_COMMAND to a dsh.cmd path.'
       )
     }
-    fs.mkdirSync(path.dirname(this.logPath), { recursive: true })
-    const log = fs.createWriteStream(this.logPath, { flags: 'a' })
-    log.write(`\n=== ${new Date().toISOString()} dsh-desktop: spawning ${this.dshCommand} web --host ${LOOPBACK} --port ${this.port} ===\n`)
+    return this.spawnExternal(command)
+  }
+
+  /** Start the bundled harness with Electron's own Node runtime. */
+  async spawnBundled(bin) {
+    const home = ensureHome(this.homeDir, this.harnessRoot)
+    const log = this.openLog(`spawning bundled harness ${bin} --profile web --host ${LOOPBACK} --port ${this.port}`)
+    // process.execPath is electron.exe (or the packaged app exe); with
+    // ELECTRON_RUN_AS_NODE=1 it behaves as plain Node — no external runtime.
+    // --expose-internals must be a real argv flag (Node forbids it in
+    // NODE_OPTIONS): the dsh boot injects cordis-plugin-hmr, whose loader
+    // service requires the flag (the web bundle disables its own hmr row).
+    this.child = spawn(process.execPath, ['--expose-internals', bin, '--profile', 'web', '--host', LOOPBACK, '--port', String(this.port)], {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', DSH_HOME: home },
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    this.child.stdout.pipe(log)
+    this.child.stderr.pipe(log)
+    this.mode = 'bundled'
+    return this.waitReady('bundled')
+  }
+
+  /** Start an externally resolved dsh launcher (cmd wrapper via the shell). */
+  async spawnExternal(command) {
+    const log = this.openLog(`spawning external dsh ${command} web --host ${LOOPBACK} --port ${this.port}`)
     // .cmd launchers need the shell on Windows; shell:true also tolerates
     // spaces in the resolved path.
-    this.child = spawn(this.dshCommand, ['web', '--host', LOOPBACK, '--port', String(this.port)], {
+    this.child = spawn(command, ['web', '--host', LOOPBACK, '--port', String(this.port)], {
       shell: true,
       windowsHide: true,
       // shell:true only accepts 'ignore'|'inherit'|'pipe' stdio, so pipe and
       // forward into the log stream manually.
       stdio: ['ignore', 'pipe', 'pipe'],
+      ...(this.homeDir ? { env: { ...process.env, DSH_HOME: this.homeDir } } : {}),
     })
     this.child.stdout.pipe(log)
     this.child.stderr.pipe(log)
+    this.mode = 'external'
+    return this.waitReady('external')
+  }
+
+  openLog(header) {
+    fs.mkdirSync(path.dirname(this.logPath), { recursive: true })
+    const log = fs.createWriteStream(this.logPath, { flags: 'a' })
+    log.write(`\n=== ${new Date().toISOString()} dsh-desktop: ${header} ===\n`)
+    return log
+  }
+
+  /** Poll the port until the server answers, the child dies, or the budget ends. */
+  async waitReady(mode) {
     const deadline = Date.now() + this.spawnTimeoutMs
     while (Date.now() < deadline) {
       if (this.child.exitCode !== null) {
         throw new Error(`dsh exited early (code ${this.child.exitCode}); see ${this.logPath}`)
       }
       if (await probe(this.url)) {
-        this.mode = 'spawned'
-        return { mode: 'spawned', url: this.url, pid: this.child.pid }
+        this.mode = mode
+        return { mode, url: this.url, pid: this.child.pid }
       }
       await sleep(500)
     }
@@ -135,7 +194,7 @@ export class DshServer {
 
   /** Stop the server, but only when this instance spawned it. */
   stop() {
-    if (this.mode !== 'spawned' || !this.child) return
+    if (!['bundled', 'external'].includes(this.mode) || !this.child) return
     try {
       // /T kills the whole tree (cmd wrapper + the node process it launched).
       spawnSync('taskkill', ['/pid', String(this.child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
