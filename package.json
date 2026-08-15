@@ -9,6 +9,7 @@
     "smoke": "electron . --smoke",
     "make-icon": "electron scripts/make-icon.mjs",
     "bundle": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bundle-harness.ps1",
+    "package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1",
     "dist": "electron-builder --win portable"
   },
   "build": {

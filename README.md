@@ -4,6 +4,15 @@ DeepSeek Harness Web GUI 的桌面壳（Electron）：把 `dsh web` 装进独立
 系统托盘。**打包后完全自包含**——harness 代码（含 dsh CLI 与 Web 前端）内置
 在应用里，机器上不需要任何 dsh / node 安装，双击即用。
 
+## 上游项目
+
+本应用内置的 harness 来自
+[**DeepSeek Harness**](https://github.com/deepseek-ai/deepseek-harness)——
+DeepSeek 官方的插件式 Agent 执行环境（Cordis 组合，`dsh web` 即其 Web GUI）。
+`dsh-desktop` 是它的**桌面壳**：不改动 harness 任何代码，只负责窗口、托盘、
+服务生命周期与打包分发。harness 升级后执行 `npm run package -- -RefreshBundle`
+即可把新版本重新打进应用。
+
 ```
 ┌──────────────────────────┐
 │   Electron 窗口（独立应用） │
@@ -38,8 +47,17 @@ npm start          # 启动桌面应用
 
 ## 打包成独立 exe
 
+一键打包（推荐）：
+
 ```powershell
-npm run bundle     # 先确保 resources/harness 是最新部署
+npm run package                 # 复用现有 resources/harness，构建便携 exe
+npm run package -- -RefreshBundle   # 先从当前部署重新同步 harness 再打包
+```
+
+手动分步：
+
+```powershell
+npm run bundle     # 把当前部署的 harness 复制进 resources/harness（255MB，一次性）
 npm run dist       # electron-builder --win portable → dist/DSH Desktop.exe
 ```
 
