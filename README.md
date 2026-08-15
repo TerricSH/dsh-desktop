@@ -50,15 +50,22 @@ npm start          # 启动桌面应用
 一键打包（推荐）：
 
 ```powershell
-npm run package                 # 复用现有 resources/harness，构建便携 exe
+npm run package                 # 复用现有 resources/harness，产出安装包 + 便携版
 npm run package -- -RefreshBundle   # 先从当前部署重新同步 harness 再打包
 ```
+
+产物（`dist/`）：
+
+| 文件 | 说明 |
+|---|---|
+| `DSH Desktop Setup 0.1.0.exe` | **NSIS 安装版（推荐）**：安装有进度条，装完后启动无解压、秒开 |
+| `DSH Desktop 0.1.0.exe` | **便携版**：单文件拷走即用；**首次双击会静默解压数分钟**（33000 个文件，期间无任何窗口），之后启动复用缓存 |
 
 手动分步：
 
 ```powershell
 npm run bundle     # 把当前部署的 harness 复制进 resources/harness（255MB，一次性）
-npm run dist       # electron-builder --win portable → dist/DSH Desktop.exe
+npm run dist       # electron-builder --win → 两个安装产物
 ```
 
 产物是单个便携 exe（~200MB）：拷贝到任何 Windows 机器双击即用，自带 Node

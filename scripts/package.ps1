@@ -35,15 +35,19 @@ if ($needBundle) {
   Write-Host "[package] reusing existing harness: $harness"
 }
 
-# --- 2. build the portable exe --------------------------------------------
-Write-Host '[package] building portable exe...' -ForegroundColor Cyan
+# --- 2. build the distributables -------------------------------------------
+# nsis = installer (progress bar during the one-time install; instant,
+# stub-free launches afterwards — the recommended way to run this app).
+# portable = single exe, extracts to %TEMP% on first launch (silent, can take
+# several minutes for the 33k-file harness; subsequent launches reuse it).
+Write-Host '[package] building nsis installer + portable exe...' -ForegroundColor Cyan
 if ($Mirror) {
   $env:ELECTRON_MIRROR = $Mirror
   $env:ELECTRON_BUILDER_BINARIES_MIRROR = ($Mirror -replace 'electron/?$', 'electron-builder-binaries/')
 }
 if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
 Push-Location $root
-npx electron-builder --win portable 2>&1 | ForEach-Object { Write-Host $_ }
+npx electron-builder --win 2>&1 | ForEach-Object { Write-Host $_ }
 $code = $LASTEXITCODE
 Pop-Location
 if ($code -ne 0) { Fail "electron-builder failed (exit $code)" }
@@ -59,12 +63,14 @@ if (-not (Test-Path (Join-Path $packedHarness 'install\node_modules\@deepseek-ai
 $harnessSize = (Get-ChildItem (Join-Path $packedHarness 'install') -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
 
 # --- 4. report --------------------------------------------------------------
-$exe = Get-ChildItem $dist -Filter '*.exe' | Where-Object { $_.FullName -notmatch 'win-unpacked' } | Select-Object -First 1
-if (-not $exe) { Fail 'no portable exe produced' }
+$artifacts = Get-ChildItem $dist -Filter '*.exe' | Where-Object { $_.FullName -notmatch 'win-unpacked' }
+if (-not $artifacts) { Fail 'no distributables produced' }
 
 Write-Host ''
 Write-Host '[package] DONE' -ForegroundColor Green
-Write-Host ("  exe     : {0}  ({1} MB)" -f $exe.FullName, [math]::Round($exe.Length / 1MB, 1))
-Write-Host ("  harness : {0} MB inside the package" -f [math]::Round($harnessSize / 1MB, 1))
-Write-Host '  verify  : dist\win-unpacked\DSH Desktop.exe --smoke --port 3199'
+foreach ($a in $artifacts) {
+  Write-Host ("  artifact : {0}  ({1} MB)" -f $a.Name, [math]::Round($a.Length / 1MB, 1))
+}
+Write-Host ("  harness  : {0} MB inside the package" -f [math]::Round($harnessSize / 1MB, 1))
+Write-Host '  verify   : dist\win-unpacked\DSH Desktop.exe --smoke --port 3199'
 exit 0
