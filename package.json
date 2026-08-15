@@ -1,0 +1,27 @@
+{
+  "name": "@terricsh/dsh-desktop",
+  "version": "0.1.0",
+  "description": "Desktop shell for the DeepSeek Harness Web GUI: own window + tray, manages the local dsh web server (attach or spawn).",
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "smoke": "electron . --smoke",
+    "make-icon": "electron scripts/make-icon.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TerricSH/dsh-desktop.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "deepseek",
+    "dsh",
+    "electron",
+    "desktop",
+    "gui"
+  ],
+  "devDependencies": {
+    "electron": "^43.4.0"
+  }
+}
