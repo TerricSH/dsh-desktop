@@ -1,20 +1,28 @@
 // dsh-desktop: an Electron shell for the DeepSeek Harness Web GUI.
 //
 // Behaviour:
-// - attach to an already-running dsh web server on the port (default 3080), or
-//   spawn the dsh CLI and wait for it to become ready;
+// - the app is its own independent system: it always spawns its own dsh web
+//   server (bundled harness, or an external dsh launcher as fallback) on a
+//   free port and owns that process; with --attach it instead reuses a server
+//   already answering on the port;
 // - show the GUI in an own window (no browser chrome), minimize to tray;
+// - register the dsh:// URL scheme: notification clicks and other deep links
+//   (dsh://open-session?session=<id>) focus this window and open the session
+//   in it, never a browser;
 // - on quit, stop only a server this app spawned; an attached server survives.
 //
 // Flags:
 //   --smoke              headless verification: load the page, screenshot to
 //                        smoke.png, print SMOKE_OK / SMOKE_FAIL, exit
-//   --port <n>           port to attach/spawn on (default 3080)
-//   --dsh-command <cmd>  dsh launcher to spawn (default: auto-resolve)
+//   --port <n>           preferred port for the app's own server (default 3080)
+//   --dsh-command <cmd>  dsh launcher to spawn (default: bundled harness)
 //   --no-tray            quit when the window closes instead of hiding to tray
+//   --attach             attach to an already-running server instead of
+//                        spawning the app's own independent one
 //   --help               this text
 
 import { app, BrowserWindow, Tray, Menu, nativeImage, dialog } from 'electron'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -48,11 +56,12 @@ const DATA_DIR = app.isPackaged ? path.join(app.getPath('userData'), 'data') : p
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function parseFlags(argv) {
-  const flags = { smoke: false, port: 3080, dshCommand: undefined, noTray: false, help: false }
+  const flags = { smoke: false, port: 3080, dshCommand: undefined, noTray: false, attach: false, help: false }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--smoke') flags.smoke = true
     else if (arg === '--no-tray') flags.noTray = true
+    else if (arg === '--attach') flags.attach = true
     else if (arg === '--help' || arg === '-h') flags.help = true
     else if (arg === '--port') flags.port = Number(argv[++i])
     else if (arg === '--dsh-command') flags.dshCommand = argv[++i]
@@ -69,12 +78,18 @@ const flags = parseFlags(process.argv.slice(1))
 if (flags.help) {
   console.log(`dsh-desktop — DeepSeek Harness desktop shell
 
-Usage: npm start [-- --smoke] [-- --port <n>] [-- --dsh-command <cmd>] [-- --no-tray]
+Usage: npm start [-- --smoke] [-- --port <n>] [-- --dsh-command <cmd>] [-- --no-tray] [-- --attach]
 
   --smoke              headless check: screenshot the GUI to smoke.png and exit
-  --port <n>           port to attach/spawn on (default 3080)
-  --dsh-command <cmd>  dsh launcher to spawn (default: auto-resolve)
+  --port <n>           preferred port for the app's own server (default 3080;
+                       the next free port is used when <n> is taken)
+  --dsh-command <cmd>  dsh launcher to spawn (default: bundled harness)
   --no-tray            quit on window close instead of hiding to tray
+  --attach             attach to an already-running dsh server on the port
+                       instead of starting the app's own independent server
+
+The app registers the dsh:// URL scheme; notification clicks and other deep
+links activate this window instead of opening a browser.
 
 Environment:
   DSH_DESKTOP_COMMAND   same as --dsh-command
@@ -91,6 +106,71 @@ let tray
 /** @type {DshServer | undefined} */
 let server
 let quitting = false
+
+// ---- dsh:// deep links ------------------------------------------------
+// The app registers the 'dsh' URL scheme (see registerProtocol). Notification
+// clicks and other deep links arrive as dsh://open-session?session=<id> — on
+// the command line of a cold start, or via second-instance argv / open-url
+// while the app is already running. They focus this window and route the
+// session through the web server's existing /open-session deep link so the
+// GUI in this window (not a browser) opens the session.
+
+const PROTOCOL = 'dsh'
+
+function parseDeepLinkArgv(argv) {
+  for (const arg of argv) {
+    if (typeof arg === 'string' && arg.startsWith(PROTOCOL + '://')) return arg
+  }
+  return null
+}
+
+function parseDeepLink(link) {
+  const prefix = PROTOCOL + '://'
+  if (typeof link !== 'string' || !link.startsWith(prefix)) return null
+  const rest = link.slice(prefix.length)
+  const q = rest.indexOf('?')
+  const route = (q < 0 ? rest : rest.slice(0, q)) || 'open-session'
+  const query = q < 0 ? '' : rest.slice(q + 1)
+  const params = new URLSearchParams(query)
+  return { route, params }
+}
+
+function handleDeepLink(link) {
+  const dl = parseDeepLink(link)
+  if (!dl || dl.route !== 'open-session' || !server) return
+  const sessionId = dl.params.get('session')
+  if (!sessionId) return
+  showWindow()
+  if (win) {
+    win.loadURL(`http://127.0.0.1:${server.port}/open-session?session=${encodeURIComponent(sessionId)}`)
+  }
+}
+
+function registerProtocol() {
+  // Dev mode (unpackaged) would register electron.exe as the handler — skip it;
+  // packaged builds (installed or portable) register the real app executable.
+  if (!app.isPackaged) return
+  if (process.platform === 'darwin') {
+    app.setAsDefaultProtocolClient(PROTOCOL)
+  } else if (process.platform === 'win32') {
+    // Prefer the stable executable path. Portable builds unpack to a random
+    // temp dir; electron-builder exposes the outer launcher that stays put.
+    const target = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath
+    const command = `"${target}" "%1"`
+    const keys = [
+      ['add', `HKCU\\Software\\Classes\\${PROTOCOL}`, '/ve', '/d', 'URL:DeepSeek Harness', '/f'],
+      ['add', `HKCU\\Software\\Classes\\${PROTOCOL}`, '/v', 'URL Protocol', '/d', '', '/f'],
+      ['add', `HKCU\\Software\\Classes\\${PROTOCOL}\\shell\\open\\command`, '/ve', '/d', command, '/f'],
+    ]
+    for (const args of keys) {
+      try {
+        spawnSync('reg', args, { windowsHide: true, stdio: 'ignore' })
+      } catch (err) {
+        /* best-effort */
+      }
+    }
+  }
+}
 
 function iconPath(name) {
   const full = path.join(ASSETS, name)
@@ -199,19 +279,37 @@ const gotLock = app.requestSingleInstanceLock()
 if (!gotLock && !flags.smoke) {
   app.quit()
 } else {
-  app.on('second-instance', showWindow)
+  // Register the dsh:// scheme before ready (required on macOS so URL
+  // activation is delivered to this instance).
+  registerProtocol()
+
+  // Protocol activation while another instance owns the lock lands here with
+  // the URL in argv; focus the running window and follow the deep link.
+  app.on('second-instance', (event, argv) => {
+    showWindow()
+    const link = parseDeepLinkArgv(argv)
+    if (link) handleDeepLink(link)
+  })
+  // macOS: URL activation of the app bundle.
+  app.on('open-url', (event, url) => {
+    event.preventDefault()
+    handleDeepLink(url)
+  })
 
   app.whenReady().then(async () => {
+    // A cold start from a deep link carries the URL in our own argv.
+    const coldLink = parseDeepLinkArgv(process.argv)
     server = new DshServer({
       port: flags.port,
       dshCommand: flags.dshCommand,
       harnessRoot: HARNESS_ROOT,
       homeDir: HOME_DIR,
       logDir: DATA_DIR,
+      attach: flags.attach,
     })
     try {
       const { mode, url } = await server.start()
-      const modeLabel = mode === 'bundled' ? 'spawned bundled harness' : mode === 'external' ? 'spawned external dsh' : 'attached'
+      const modeLabel = mode === 'bundled' ? 'spawned own bundled harness' : mode === 'external' ? 'spawned external dsh' : 'attached (--attach)'
       console.log(`[dsh-desktop] server ${modeLabel} at ${url}`)
       openWindow(url)
       if (flags.smoke) {
@@ -223,6 +321,7 @@ if (!gotLock && !flags.smoke) {
       }
       createTray()
       console.log('[dsh-desktop] ready; close the window to minimize to tray, tray menu to quit')
+      if (coldLink) handleDeepLink(coldLink)
     } catch (error) {
       console.error('[dsh-desktop] startup failed:', error)
       if (flags.smoke) {

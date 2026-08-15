@@ -7,6 +7,7 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
+import net from 'node:net'
 import path from 'node:path'
 import { ensureHome } from './home.js'
 
@@ -90,8 +91,15 @@ export class DshServer {
    * harness; also honored as DSH_HOME for an external spawn when set.
    * @param {string} logDir - directory for the spawned server's log file.
    * @param {number} [options.spawnTimeoutMs] - readiness budget after spawning (default 90s).
+   * @param {boolean} [options.attach] - opt-in: attach to a server already
+   * answering on the port instead of starting an independent one. Off by
+   * default: the app is its own system and always owns its server process.
+   * @param {string} [options.protocol] - custom URL scheme the desktop app
+   * registers (default 'dsh'). Forwarded to the spawned harness as
+   * DSH_DESKTOP_PROTOCOL so plugins (e.g. dsh-notify) can deep-link back into
+   * the app instead of opening a browser.
    */
-  constructor({ port = 3080, dshCommand, harnessRoot, homeDir, logDir, spawnTimeoutMs = 90_000 } = {}) {
+  constructor({ port = 3080, dshCommand, harnessRoot, homeDir, logDir, spawnTimeoutMs = 90_000, attach = false, protocol = 'dsh' } = {}) {
     this.port = port
     this.url = localUrl(port)
     this.explicitCommand = dshCommand
@@ -99,6 +107,8 @@ export class DshServer {
     this.homeDir = homeDir
     this.logPath = path.join(logDir, 'server.log')
     this.spawnTimeoutMs = spawnTimeoutMs
+    this.attach = attach
+    this.protocol = protocol
     /** @type {'attached'|'bundled'|'external'|undefined} */
     this.mode = undefined
     /** @type {import('node:child_process').ChildProcess | undefined} */
@@ -106,13 +116,24 @@ export class DshServer {
   }
 
   /**
-   * Attach to a server already answering on the port, or start one.
+   * Start the app's own server. By default (independent mode) the app owns a
+   * fresh harness process and never shares another server; pass attach:true to
+   * reuse a server that is already answering on the port.
    * @returns {{ mode: 'attached'|'bundled'|'external', url: string, pid?: number }}
    */
   async start() {
-    if (await probe(this.url)) {
+    if (this.attach && (await probe(this.url))) {
       this.mode = 'attached'
       return { mode: 'attached', url: this.url }
+    }
+
+    // Independent mode: pick a port that is actually free (the configured one
+    // may be held by an unrelated server) and spawn our own harness on it.
+    const chosen = await this.findFreePort(this.port)
+    if (chosen !== this.port) {
+      console.log(`[dsh-desktop] port ${this.port} is in use by another server; using ${chosen} instead`)
+      this.port = chosen
+      this.url = localUrl(chosen)
     }
 
     const bundled = bundledDshBin(this.harnessRoot)
@@ -130,6 +151,31 @@ export class DshServer {
     return this.spawnExternal(command)
   }
 
+  /**
+   * Find the first free loopback port at or above `start` by attempting a real
+   * bind (probe() only detects HTTP servers, not arbitrary occupants).
+   */
+  findFreePort(start, maxTries = 200) {
+    return new Promise((resolve, reject) => {
+      const tryPort = (port, triesLeft) => {
+        if (triesLeft <= 0) {
+          reject(new Error(`no free port found starting at ${start}`))
+          return
+        }
+        const probeServer = net.createServer()
+        probeServer.once('error', () => {
+          try { probeServer.close() } catch (e) { /* ignore */ }
+          tryPort(port + 1, triesLeft - 1)
+        })
+        probeServer.once('listening', () => {
+          probeServer.close(() => resolve(port))
+        })
+        probeServer.listen(port, LOOPBACK)
+      }
+      tryPort(start, maxTries)
+    })
+  }
+
   /** Start the bundled harness with Electron's own Node runtime. */
   async spawnBundled(bin) {
     const home = ensureHome(this.homeDir, this.harnessRoot)
@@ -140,7 +186,14 @@ export class DshServer {
     // NODE_OPTIONS): the dsh boot injects cordis-plugin-hmr, whose loader
     // service requires the flag (the web bundle disables its own hmr row).
     this.child = spawn(process.execPath, ['--expose-internals', bin, '--profile', 'web', '--host', LOOPBACK, '--port', String(this.port)], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', DSH_HOME: home },
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: '1',
+        DSH_HOME: home,
+        // Lets host plugins (dsh-notify) build deep links that activate this
+        // desktop app instead of opening a browser.
+        DSH_DESKTOP_PROTOCOL: this.protocol,
+      },
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -161,7 +214,9 @@ export class DshServer {
       // shell:true only accepts 'ignore'|'inherit'|'pipe' stdio, so pipe and
       // forward into the log stream manually.
       stdio: ['ignore', 'pipe', 'pipe'],
-      ...(this.homeDir ? { env: { ...process.env, DSH_HOME: this.homeDir } } : {}),
+      ...(this.homeDir
+        ? { env: { ...process.env, DSH_HOME: this.homeDir, DSH_DESKTOP_PROTOCOL: this.protocol } }
+        : { env: { ...process.env, DSH_DESKTOP_PROTOCOL: this.protocol } }),
     })
     this.child.stdout.pipe(log)
     this.child.stderr.pipe(log)

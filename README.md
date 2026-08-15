@@ -16,25 +16,31 @@ DeepSeek 官方的插件式 Agent 执行环境（Cordis 组合，`dsh web` 即�
 ```
 ┌──────────────────────────┐
 │   Electron 窗口（独立应用） │
-│   ← 加载 http://127.0.0.1:3080 │
+│   ← 加载 http://127.0.0.1:<port> │
 └──────────────────────────┘
-        │  attach（端口已有服务时）／ spawn（自己起，内置 harness）
+        │  spawn（默认，自己起内置 harness）；attach 仅在 --attach 时
         ▼
 ┌──────────────────────────┐
 │   dsh web（Node 宿主进程）  │   ← 关闭窗口=最小化到托盘，退出=杀进程
 └──────────────────────────┘
 ```
 
-## 两种运行方式
+## 运行方式：应用是独立的一套体系
 
 | 场景 | 行为 |
 |---|---|
-| 端口上已有 DSH 服务（如浏览器里开着 GUI） | **attach**：直接挂接，不重复拉起，退出不影响它 |
-| 没有服务 | **spawn**：从内置 harness 起自己的服务（`--expose-internals` 走 Electron 自带 Node 运行时），退出时杀掉 |
+| 默认 | **spawn**：从内置 harness 起**自己的**服务（`--expose-internals` 走 Electron 自带 Node 运行时），端口被占用时自动顺延到下一个空闲端口；退出时杀掉整个进程树，服务随之停止 |
+| `--attach` | 显式挂接端口上已有的 DSH 服务（测试/临时复用用），退出不影响它 |
 
 内置服务使用应用自己的 DSH home（默认 `<userData>/dsh-home`），与浏览器 GUI
-的 `$DSH_HOME` 相互独立——这就是"独立的服务"。首次运行会自动播种：profile
-配置拷入 home，包树由 dsh 自己的安装回退机制链接（`healProfilesModuleFallback`）。
+的 `$DSH_HOME` 相互独立——应用不共用、不依赖任何外部 `dsh web`（“网页的
+node”）进程。首次运行会自动播种：profile 配置拷入 home，内置插件
+（`@terricsh/dsh-notify`、`@terricsh/dsh-app-launcher`）从 bundled 安装树链
+进 profile 的 node_modules。
+
+应用注册 `dsh://` URL scheme：通知点击等深链
+（`dsh://open-session?session=<id>`）会**聚焦应用窗口**并跳转到对应会话，
+而不会在浏览器里打开网页。
 
 ## 开发态运行
 
@@ -74,9 +80,10 @@ npm run dist       # electron-builder --win → 两个安装产物
 ## 可选参数
 
 ```
-npm start -- --port 3199           # 换端口
+npm start -- --port 3199           # 首选端口（被占用时自动顺延）
 npm start -- --dsh-command "C:\path\to\dsh.cmd"   # 强制用外部 dsh（跳过内置）
 npm start -- --no-tray             # 关窗口直接退出（不驻留托盘）
+npm start -- --attach              # 挂接已有服务（默认是自己起独立服务）
 npm start -- --smoke               # 无头自检：截图 smoke.png 后退出
 ```
 
@@ -92,7 +99,7 @@ npm start -- --smoke               # 无头自检：截图 smoke.png 后退出
 ## 自检
 
 ```powershell
-npm run smoke      # 挂接运行中的 GUI，截图到 data/smoke.png 后退出
+npm run smoke      # 起独立服务（端口被占用则顺延），加载 GUI，截图到 data/smoke.png 后退出
 ```
 
 全链路 bundled 自检（无需任何外部 dsh）：
@@ -105,13 +112,19 @@ electron.exe . --smoke --port 3199
 
 ## 在应用自己的 home 里加插件
 
-应用的 home（默认 `%APPDATA%\dsh-desktop\dsh-home`）profile patch 初始为空。
-要装插件（如 `@terricsh/dsh-notify`、`@terricsh/dsh-app-launcher`）：
+应用的 home（默认 `<userData>/dsh-home`）profile patch 由 bundled 配置播种，
+**开箱即带** `@terricsh/dsh-notify`（桌面通知）和 `@terricsh/dsh-app-launcher`
+（工作区启动器）两个内置插件（`npm run bundle` 时连同代码一起打进
+`resources/harness`，首次运行由 `home.js` 链进 profile 的 node_modules）。
+
+要加自己的插件：
 
 1. 把插件包放进 `dsh-home\profiles\web\node_modules\`（或
    `dsh-home\profiles\node_modules\`）；
 2. 编辑 `dsh-home\profiles\web\cordis.patch.yml` 加 insert 行（见各插件 README）；
 3. 重启应用。
+
+不需要通知/启动器时，把 `cordis.patch.yml` 里对应的 insert 行删掉即可。
 
 ## 生成图标
 
@@ -126,12 +139,14 @@ powershell -File scripts\make-icon.ps1   # 再生成 icon.ico（Windows 任务�
   `contextIsolation: true`），与浏览器打开 `127.0.0.1:3080` 完全同权，不新增
   任何权限面；DSH 的 loopback 信任围栏、审批、沙箱全部照旧。
 - spawn 的服务日志写在 `data/server.log`（本目录，已 gitignore）。
-- 单实例锁：重复启动只会聚焦已有窗口，不会拉起第二个服务。
+- 单实例锁：重复启动只会聚焦已有窗口，不会拉起第二个服务；`dsh://` 深链
+  （通知点击等）通过 `second-instance` argv 转发给已运行实例，冷启动时则
+  从进程 argv 读取，无论哪种情况都聚焦窗口并跳转到对应会话，不打开浏览器。
 - 打包时 harness 通过 `extraResources` 以真实文件落盘（junction/链接需要真实
   路径，不能进 asar）；应用代码本体（src/assets）在 asar 内。
 
 ## 配合周边项目
 
-- [`@terricsh/dsh-notify`](../dsh-notify)：桌面通知 + 点击直达对应会话；
+- [`@terricsh/dsh-notify`](../dsh-notify)：桌面通知 + 点击**激活应用窗口**直达对应会话；
 - [`@terricsh/dsh-app-launcher`](../dsh-app-launcher)：从会话头部一键打开
   工作区文件夹 / VS Code。
